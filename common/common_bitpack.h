@@ -9,37 +9,28 @@
 
 #include <common/helper.h>
 
-inline void pack_128_fallback(const float *float_ptr, void *binary_ptr,
-                              size_t size) {
-    uint64_t *ui64_ptr = static_cast<uint64_t *>(binary_ptr);
+inline void pack_64_bitset(const float *fptr, uint64_t *buf,
+                           const size_t eff_bits = 64) {
+    /**
+     * The eff_bits is to support non-128-multiple channels.
+     * In this case, we need pad the tensor to make the
+     * channel aligned with 128.
+     */
+    // BNN_ASSERT(eff_bits == 64, eff_bits);
     const size_t UNIT_LEN = 64;
-    std::bitset<UNIT_LEN> bits1;
-    std::bitset<UNIT_LEN> bits2;
-    static_assert(std::is_same<decltype(bits1.to_ulong()), uint64_t>::value,
-                  "bits.to_ulong() must return uint64_t");
-
-    FORZS(j, size, 128) {
-        FORZS(i, 128, 4) {
-            const auto t = i / 4;
-            bits1[t] = (*(float_ptr + j + i) > 0);
-            bits1[t + 32] = (*(float_ptr + j + i + 1) > 0);
-            bits2[t] = (*(float_ptr + j + i + 2) > 0);
-            bits2[t + 32] = (*(float_ptr + j + i + 3) > 0);
-        }
-        *ui64_ptr++ = bits1.to_ulong();
-        *ui64_ptr++ = bits2.to_ulong();
-    }
-}
-
-inline void pack_64_bitset(const float *fptr, uint64_t *buf) {
-    const size_t UNIT_LEN = 64;
+    BNN_ASSERT(eff_bits <= UNIT_LEN, "The eff_bits ", eff_bits,
+               " must be smaller than UNIT_LEN ", UNIT_LEN);
     std::bitset<UNIT_LEN> bits;
     for (size_t i = 0; i < UNIT_LEN; i++) {
-        bits[i] = (*(fptr + i) > 0);
+        if (i < eff_bits) {
+            bits[i] = (*(fptr + i) > 0);
+        } else {
+            bits[i] = 0;
+        }
     }
-    static_assert(std::is_same<decltype(bits.to_ulong()), uint64_t>::value,
-                  "bits.to_ulong() must return uint64_t");
-    *buf = bits.to_ulong();
+    static_assert(sizeof(decltype(bits.to_ullong())) * CHAR_BIT == 64,
+                  "bits.to_ullong() must return a 64-bit element");
+    *buf = bits.to_ullong();
 }
 
 inline void pack_64_bitfield(const float *fptr, uint64_t *buf) {

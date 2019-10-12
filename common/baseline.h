@@ -10,8 +10,12 @@
 #include <dabnn/mat.h>
 
 inline int bitcount(uint64_t x) {
+#ifdef __aarch64__
+    return __builtin_popcountl(x);
+#else
     std::bitset<64> bs(x);
     return bs.count();
+#endif
 }
 
 inline void baseline_pack_mat(const bnn::Mat &float_mat, bnn::Mat &binary_mat) {
@@ -76,6 +80,8 @@ inline void baseline_bconv(const Mat &input, const Mat &weight,
                            const int stride_w, const int dilation_h,
                            const int dilation_w, const int output_channels,
                            Mat &output) {
+    BNN_ASSERT(weight.total() % weight.n == 0, "");
+    const auto HWC = weight.total() / weight.n;
     int input_y = 0;
     FORZ(th, output.h) {
         int input_x = 0;
@@ -87,7 +93,7 @@ inline void baseline_bconv(const Mat &input, const Mat &weight,
                     FORZ(ww, kernel_w) {
                         int x = input_x - pad_w + ww * dilation_w;
                         FORZ(wc, input.c) {
-                            int idx = tc * kernel_h * kernel_w * input.c +
+                            int idx = tc * HWC +
                                       wh * kernel_w * input.c + ww * input.c +
                                       wc;
                             const auto w_value =

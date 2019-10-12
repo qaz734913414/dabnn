@@ -7,11 +7,15 @@
 #include <arm_neon.h>
 #endif  // __ARM_NEON
 
+#if not defined(__aarch64__)
+#include <common/baseline.h>
+#endif
 #include <common/helper.h>
 #include <dabnn/im2col.h>
 #include "mat.h"
 
 namespace bnn {
+#ifdef __aarch64__
 inline void bconv_1x1_64(const Mat &bottom_blob, const Mat &weight,
                          Mat &top_blob);
 inline void bconv_1x1_128(const Mat &bottom_blob, const Mat &weight,
@@ -20,8 +24,10 @@ inline void bconv_1x1_256(const Mat &bottom_blob, const Mat &weight,
                           Mat &top_blob);
 inline void bconv_1x1_512(const Mat &bottom_blob, const Mat &weight,
                           Mat &top_blob);
+#endif
 inline void bconv_3x3(const Mat &bottom_blob, const Mat &weight, Mat &top_blob,
                       const int stride = 1);
+#ifdef __aarch64__
 inline void bconv_3x3_64(const Mat &bottom_blob, const Mat &weight,
                          Mat &top_blob, const int stride = 1);
 inline void bconv_3x3_64_fallback(const Mat &bottom_blob, const Mat &weight,
@@ -44,8 +50,10 @@ inline void bconv_3x3_128_internal_s1(const uint64_t *bottom_ptr, const int b_w,
 inline void bconv_3x3_128_internal_fallback(
     const uint64_t *bottom_ptr, const int b_w, const uint64_t *weight_ptr,
     float *top_ptr, const int top_h, const int top_w, const int stride = 1);
+#endif
 }  // namespace bnn
 
+#ifdef __aarch64__
 inline void bnn::bconv_3x3_64(const Mat &bottom_blob, const Mat &weight,
                               Mat &top_blob, const int stride) {
     bconv_3x3_64_opt4(bottom_blob, weight, top_blob, 0, stride);
@@ -54,6 +62,9 @@ inline void bnn::bconv_3x3_64(const Mat &bottom_blob, const Mat &weight,
 inline void bnn::bconv_3x3_64_opt3(const Mat &bottom_blob, const Mat &weight,
                                    Mat &top_blob, const int pad,
                                    const int stride) {
+    /**
+     * See bconv_3x3_64_opt4
+     */
     static uint64_t col_buf[999999];
 
     const size_t col_h = weight.h * weight.w;
@@ -209,6 +220,9 @@ inline void bnn::bconv_3x3_64_opt3(const Mat &bottom_blob, const Mat &weight,
 inline void bnn::bconv_3x3_64_opt2(const Mat &bottom_blob, const Mat &weight,
                                    Mat &top_blob, const int pad,
                                    const int stride) {
+    /**
+     * See bconv_3x3_64_opt4
+     */
     static uint64_t col_buf[999999];
 
     const size_t col_h = weight.h * weight.w;
@@ -274,6 +288,20 @@ inline void bnn::bconv_3x3_64_opt2(const Mat &bottom_blob, const Mat &weight,
 inline void bnn::bconv_3x3_64_opt4(const Mat &bottom_blob, const Mat &weight,
                                    Mat &top_blob, const int pad,
                                    const int stride) {
+    /**
+     * This method performs 64-input-channel 3x3 binary conv by
+     * im2col + BGEMM.
+     *
+     * The reason that it outperforms other ways when channel==64
+     * is the 128-bit vector registers cannot be fully filled in
+     * Binary Direct Convolution + NC1HWC2 memory layout if there
+     * are only 64 channels.
+     *
+     * By contrast, BGEMM can leverage 128-bit registers after im2col,
+     * and amortize the memory access.
+     *
+     */
+    // TODO: A more elegant way
     static uint64_t col_buf[999999];
 
     const size_t col_h = weight.h * weight.w;
@@ -396,6 +424,9 @@ inline void bnn::bconv_3x3_64_opt4(const Mat &bottom_blob, const Mat &weight,
 
 inline void bnn::bconv_3x3_64_opt(const Mat &bottom_blob, const Mat &weight,
                                   Mat &top_blob) {
+    /**
+     * See bconv_3x3_64_opt4
+     */
     BNN_ASSERT(weight.n % 2 == 0, weight.n);
     FORZ(th, top_blob.h) {
         FORZ(tw, top_blob.w) {
@@ -819,9 +850,18 @@ inline void unpack_output(float *b, float *a, int width, int height,
 
 #undef A
 }
+#endif  // __aarch64__
 
 inline void bnn::bconv_3x3(const Mat &bottom_blob, const Mat &weight,
                            Mat &top_blob, const int stride) {
+    /**
+     * This method shows our NC1HWC2 memory layout and Binary
+     * Direct Convolution. The input tensor and weight is packed
+     * into NC1HWC2 layout (in the method `pack_weight_3x3` and
+     * `pack_input_3x3`), the spatial redundancy is then leveraged
+     * in `bconv_3x3_128_internal_s1`.
+     */
+#ifdef __aarch64__
     // TODO: more elegant way
     static uint64_t packed_weight[999999];
     static uint64_t packed_input[9999999];
@@ -833,7 +873,7 @@ inline void bnn::bconv_3x3(const Mat &bottom_blob, const Mat &weight,
         bconv_3x3_64(bottom_blob, weight, top_blob, stride);
     } else if (bottom_blob.c == 2 && top_blob.c == 128) {
         top_blob.fill<float>(0.f);
-        if (stride == 1) {
+        if (stride == 1 && top_blob.w % 2 == 0) {
             bconv_3x3_128_internal_s1(
                 static_cast<uint64_t *>(bottom_blob.data), bottom_blob.w,
                 static_cast<uint64_t *>(weight.data),
@@ -884,8 +924,13 @@ inline void bnn::bconv_3x3(const Mat &bottom_blob, const Mat &weight,
         unpack_output(packed_output, static_cast<float *>(top_blob.data),
                       top_blob.w, top_blob.h, top_blob.c);
     }
+#else   // __aarch64__
+    baseline_bconv(bottom_blob, weight, 3, 3, 0, 0, stride, stride, 1, 1,
+                   top_blob.c, top_blob);
+#endif  // __aarch64__
 }
 
+#ifdef __aarch64__
 inline void bnn::bconv_1x1_512(const Mat &bottom_blob, const Mat &weight,
                                Mat &top_blob) {
     FORZS(th, top_blob.h, 2) {
@@ -1673,5 +1718,6 @@ inline void bnn::bconv_1x1_64(const Mat &bottom_blob, const Mat &weight,
         }
     }
 }
+#endif  // __aarch64__
 
 #endif

@@ -1,0 +1,11 @@
+steps:
+- bash: ci/adb_push_and_run.sh build_dabnn/tests/bconv_test
+  displayName: Binary Conv Test
+- bash: ci/adb_push_and_run.sh build_dabnn/tests/bgemm_test
+  displayName: Binary Gemm Test
+- bash: ci/build_onnx2bnn.sh
+  displayName: Build onnx2bnn
+- bash: ci/download_and_convert_models.sh
+  displayName: Download and Convert Models
+- bash: ci/adb_push_and_run.sh build_dabnn/tests/net_test
+  displayName: Model Test

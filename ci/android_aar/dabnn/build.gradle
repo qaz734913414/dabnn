@@ -1,0 +1,48 @@
+apply plugin: 'com.android.library'
+apply plugin: 'com.novoda.bintray-release' // must be applied after your artifact generating plugin (eg. java / com.android.library)
+
+static def generateVersionCode() {
+    def result = "git rev-list HEAD --count".execute().text.trim() //unix
+    if(result.empty) result = "PowerShell -Command git rev-list HEAD --count".execute().text.trim() //windows
+    if(result.empty) throw new RuntimeException("Could not generate versioncode on this platform? Cmd output: ${result.text}")
+    return result.toInteger()
+}
+
+buildscript {
+    repositories {
+        jcenter()
+    }
+    dependencies {
+        classpath 'com.novoda:bintray-release:0.9.1'
+    }
+}
+
+android {
+    compileSdkVersion 28
+
+
+    defaultConfig {
+        minSdkVersion 21
+        targetSdkVersion 28
+        versionCode generateVersionCode()
+        versionName "0.1"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+}
+
+publish {
+    userOrg = 'daquexian566'
+    groupId = 'me.daquexian'
+    artifactId = 'dabnn'
+    publishVersion = '0.1.0'
+    desc = 'dabnn is an accelerated binary neural networks inference framework for mobile platform'
+    website = 'https://github.com/JDAI-CV/dabnn'
+}
+

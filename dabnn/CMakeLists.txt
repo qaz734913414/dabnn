@@ -31,6 +31,8 @@ add_library(dabnn
     layers/Shuffle.h
     layers/Split.cpp
     layers/Split.h
+    layers/PRelu.cpp
+    layers/PRelu.h
     layer.h
     layer.cpp
     ${PROJECT_SOURCE_DIR}/common/Shaper.cpp
@@ -41,8 +43,14 @@ target_include_directories(dabnn
     ${CMAKE_CURRENT_BINARY_DIR}
     ${PROJECT_SOURCE_DIR}
     )
+target_include_directories(dabnn
+    SYSTEM
+    PUBLIC
+    ${PROJECT_SOURCE_DIR}/third_party/eigen
+    )
 target_link_libraries(dabnn
     glog::glog
+    flatbuffers
     )
 
 if (${BNN_BUILD_JNI})

@@ -15,6 +15,7 @@
 #include <common/common_bitpack.h>
 #include <common/flatbuffers_helper.h>
 #include <common/helper.h>
+#include <common/macros.h>
 #include <glog/logging.h>
 #include <onnx/onnx_pb.h>
 #include <onnx/optimizer/optimize.h>
@@ -26,8 +27,6 @@ using std::string;
 using std::unique_ptr;
 using std::vector;
 using Shape = Shaper::Shape;
-
-bool is_binary_weight(const float *data, Shape shape);
 
 std::string OnnxConverter::m(const std::string &str) {
     if (name_map_.find(str) != name_map_.end()) {
@@ -44,28 +43,15 @@ void OnnxConverter::AddBinConv(const std::string &input_name,
                                const std::string &weight_name,
                                const std::string &output_name,
                                BTensor bin_weight) {
-    bnn_bin_tensors_[weight_name] = bin_weight;
-
-    css bin_name = input_name + "_bin";
-
-    {
-        const auto param = flatbnn::CreateBinarizeDirect(
-            builder_, input_name.c_str(), bin_name.c_str());
-        const auto layer =
-            flatbnn::CreateLayer(builder_, flatbnn::LayerType::Binarize, 0, 0,
-                                 0, 0, 0, 0, 0, 0, 0, 0, param);
-        layers_.push_back(layer);
-    }
-
     BNN_ASSERT(group == 1, "Group != 1 is not supported");
     const auto param = flatbnn::CreateBinConv2DDirect(
-        builder_, bin_name.c_str(), weight_name.c_str(), nullptr, &pads,
+        builder_, input_name.c_str(), weight_name.c_str(), nullptr, &pads,
         &strides, &dilations, output_name.c_str());
-    const auto layer = flatbnn::CreateLayer(
-        builder_, flatbnn::LayerType::BinConv2D, 0, param);
+    const auto layer =
+        flatbnn::CreateLayer(builder_, flatbnn::LayerType::BinConv2D, 0, param);
     const auto flat_tensor = flatbnn::CreateTensorDirect(
         builder_, flatbnn::DataType::Bit, &bin_weight.data, nullptr,
-        &bin_weight.shape, weight_name.c_str());
+        &bin_weight.shape, weight_name.c_str(), bin_weight.align_hwc_to_128);
     tensors_.push_back(flat_tensor);
     layers_.push_back(layer);
 }
@@ -103,7 +89,7 @@ void OnnxConverter::AddConv(const string &input_name,
                             const std::vector<int> &dilations, int group,
                             const string &ori_weight_name,
                             const nonstd::optional<std::string> &bias_name,
-                            const string &output_name) {
+                            const string &output_name, const bool binary) {
     flatbuffers::Offset<flatbnn::Layer> layer;
 
     flatbuffers::Offset<flatbnn::Tensor> flat_tensor;
@@ -114,56 +100,59 @@ void OnnxConverter::AddConv(const string &input_name,
     shaper_.AddShape(weight_name, bnn_float_tensor.shape);
     shaper_.Conv(input_name, strides[1], strides[0], 1, 1, pads[2], pads[3],
                  pads[0], pads[1], weight_name, output_name);
-    if (!is_binary_weight(onnx_weight.data.data(), onnx_weight.shape)) {
-        AddFloatConv(input_name, strides, pads, dilations, group, weight_name,
-                     bias_name, output_name, bnn_float_tensor);
-    } else {
-        // binary conv
+
+    if (binary) {
         VLOG(5) << "Binary conv" + weight_name;
         BTensor weight_tensor = bitpack(bnn_float_tensor);
         AddBinConv(input_name, strides, pads, dilations, group, weight_name,
                    output_name, weight_tensor);
+    } else {
+        AddFloatConv(input_name, strides, pads, dilations, group, weight_name,
+                     bias_name, output_name, bnn_float_tensor);
     }
-}
-
-bool is_binary_weight(const float *data, Shape shape) {
-    FORZ(i, Shaper::total(shape)) {
-        if (data[i] != -1 && data[i] != 1) {
-            return false;
-        }
-    }
-    return true;
 }
 
 /*
  * Bitpack a bnn tensor, input_channels should be the last dimension
+ * The data size of the packed tensor may be different from
+ * Shaper::total(tensor.shape) / 64, since every HWC will be padded
+ * so that they are aligned to 128.
  */
 OnnxConverter::BTensor OnnxConverter::bitpack(OnnxConverter::FTensor ftensor) {
     static_assert(std::is_same<bin_t, uint64_t>::value,
                   "bitpack requires bin_t is 64 bit");
 
-    auto c = Shaper::kc(ftensor.shape);
-
-    BNN_ASSERT(c % 64 == 0, ftensor.shape);
+    const auto N = Shaper::kn(ftensor.shape);
+    const auto C = Shaper::kc(ftensor.shape);
+    const auto HWC = Shaper::total(ftensor.shape) / N;
 
     vector<bin_t> packed_data;
-    // if (c % 128 == 0) {
-    if (false) {
-        const auto size = Shaper::total(ftensor.shape);
-        packed_data.resize(size / 64);
-        pack_128_fallback(&ftensor.data[0], &packed_data[0], size);
-    } else {
-        bin_t tmp;
+    bin_t tmp;
 
+    Shape shape = {ftensor.shape[0], ftensor.shape[1], ftensor.shape[2],
+                   ftensor.shape[3]};
+    bool align_hwc_to_128 = (C != 64);
+    if (align_hwc_to_128) {
+        FORZ(n, N) {
+            FORZS(i, HWC, 128) {
+                const size_t eff_bits = std::min<size_t>(HWC - i, 128);
+                pack_64_bitset(&ftensor.data[n * HWC + i], &tmp,
+                               std::min<size_t>(eff_bits, 64));
+                packed_data.push_back(tmp);
+                pack_64_bitset(
+                    &ftensor.data[n * HWC + i + 64], &tmp,
+                    std::min<size_t>(std::max<size_t>(0, eff_bits - 64), 64));
+                packed_data.push_back(tmp);
+            }
+        }
+    } else {
         FORZS(i, Shaper::total(ftensor.shape), 64) {
             pack_64_bitset(&ftensor.data[i], &tmp);
             packed_data.push_back(tmp);
         }
     }
 
-    Shape shape = {ftensor.shape[0], ftensor.shape[1], ftensor.shape[2],
-                   ftensor.shape[3]};
-    return {packed_data, shape};
+    return {packed_data, shape, align_hwc_to_128};
 }
 
 std::vector<OnnxConverter::BTensor> OnnxConverter::split(
@@ -192,33 +181,29 @@ std::vector<OnnxConverter::BTensor> OnnxConverter::split(
     return outputs;
 }
 
-vector<bin_t> bitpack(const float *data, Shape shape) {
-    static_assert(std::is_same<bin_t, uint64_t>::value,
-                  "bitpack requires bin_t is 64 bit");
-
-    auto c = Shaper::onnx_kc(shape);
-
-    BNN_ASSERT(c % 64 == 0, shape);
-
-    vector<bin_t> packed;
-
-    bin_t tmp;
-
-    FORZS(i, Shaper::total(shape), 64) {
-        pack_64_bitset(&data[i], &tmp);
-        packed.push_back(tmp);
-    }
-    BNN_ASSERT(false, "");
-
-    return packed;
-}
-
-void OnnxConverter::Convert(const ONNX_NAMESPACE::ModelProto &model_proto,
-                            const std::string &filepath) {
+std::vector<std::string> OnnxConverter::Convert(
+    const ONNX_NAMESPACE::ModelProto &model_proto, const std::string &filepath,
+    const OnnxConverter::Level level,
+    const std::vector<std::string> &expected_binary_conv_outputs) {
     GOOGLE_PROTOBUF_VERIFY_VERSION;
 
-    model_proto_ = ONNX_NAMESPACE::optimization::Optimize(
-        model_proto, vector<string>{"eliminate_nop_pad"});
+    // We recognize binary convolutions in our custom ONNX optimizers.
+    // Please check out "dabnn_*" pases in
+    // https://github.com/daquexian/onnx/blob/optimizer_for_bnn/onnx/optimizer/passes
+    // for details.
+    vector<string> optimizers{"eliminate_nop_pad",
+                              "extract_constant_to_initializer",
+                              "dabnn_bconv_strict"};
+    if (level == Level::kModerate || level == Level::kAggressive) {
+        optimizers.push_back("dabnn_bconv_moderate");
+    }
+    if (level == Level::kAggressive) {
+        optimizers.push_back("dabnn_bconv_aggressive");
+    }
+    // model_proto is only used here. Please use the member variable
+    // model_proto_ in the following code
+    model_proto_ =
+        ONNX_NAMESPACE::optimization::Optimize(model_proto, optimizers);
 
     for (const auto &tensor : model_proto_.graph().initializer()) {
         if (tensor.data_type() == ONNX_NAMESPACE::TensorProto_DataType_FLOAT) {
@@ -232,12 +217,10 @@ void OnnxConverter::Convert(const ONNX_NAMESPACE::ModelProto &model_proto,
                     : tensor.float_data().data();
             auto data_vec = vector<float>(ptr, ptr + Product(shape));
 
-            onnx_float_tensors_[tensor.name()] = {data_vec, shape};
+            onnx_float_tensors_[tensor.name()] = {data_vec, shape, false};
         }
         operands_.push_back(tensor.name());
     }
-    VLOG(5) << "We get " << onnx_bin_tensors_.size() << " binary weight and "
-              << onnx_float_tensors_.size() << " float weight";
 
     vector<flatbuffers::Offset<flatbnn::Input>> inputs;
     for (const auto &input : model_proto_.graph().input()) {
@@ -263,6 +246,7 @@ void OnnxConverter::Convert(const ONNX_NAMESPACE::ModelProto &model_proto,
         inputs.push_back(flat_input);
     }
 
+    vector<string> binary_conv_outputs;
     vector<string> skipped_act;
     bool has_reshape = false;
     for (const auto &node : model_proto_.graph().node()) {
@@ -297,8 +281,29 @@ void OnnxConverter::Convert(const ONNX_NAMESPACE::ModelProto &model_proto,
             }
 
             auto ori_weight_name = m(node.input(1));
+            const bool binary_conv =
+                (node.domain() == "dabnn") ||
+                (std::find(expected_binary_conv_outputs.begin(),
+                           expected_binary_conv_outputs.end(),
+                           node.output(0)) !=
+                 expected_binary_conv_outputs.end());
+            if (binary_conv) {
+                binary_conv_outputs.push_back(node.output(0));
+                bool precede_bn = false;
+                for (const auto &node2 : model_proto_.graph().node()) {
+                    if (node2.op_type() == "BatchNormalization" &&
+                        node2.input(0) == node.output(0)) {
+                        precede_bn = true;
+                        break;
+                    }
+                }
+                if (!precede_bn) {
+                    throw std::invalid_argument(
+                        "Binary convolutions should precede BatchNorm");
+                }
+            }
             AddConv(m(node.input(0)), strides, pads, dilations, group,
-                    ori_weight_name, bias_name, m(node.output(0)));
+                    ori_weight_name, bias_name, m(node.output(0)), binary_conv);
             VLOG(5) << "Converting Conv completed";
         } else if (op == "AveragePool" || op == "MaxPool" ||
                    op == "GlobalAveragePool" || op == "GlobalMaxPool") {
@@ -350,6 +355,34 @@ void OnnxConverter::Convert(const ONNX_NAMESPACE::ModelProto &model_proto,
             }
             layers_.push_back(layer);
             VLOG(5) << "Converting Pool completed";
+        } else if (op == "PRelu") {
+            VLOG(5) << "Start converting PRelu";
+            auto input_name = m(node.input(0));
+            auto slope_name = m(node.input(1));
+            const auto onnx_slope_tensor = onnx_float_tensors_.at(slope_name);
+            BNN_ASSERT(shaper_[input_name].size() == 4,
+                       "PRelu only support 4-d tensor input for now");
+            const auto slope_shape = onnx_slope_tensor.shape;
+            BNN_ASSERT(
+                (slope_shape.size() == 3 && slope_shape[1] == 1 &&
+                 slope_shape[2] == 1) ||
+                    onnx_slope_tensor.data == std::vector<float>{1},
+                "PRelu only support scalr slope or per-channel slope for now");
+            const Shape flat_slope_shape{slope_shape[0]};
+            auto flat_slope_tensor = flatbnn::CreateTensorDirect(
+                builder_, flatbnn::DataType::Float32, nullptr,
+                &onnx_slope_tensor.data, &flat_slope_shape, slope_name.c_str());
+            tensors_.push_back(flat_slope_tensor);
+            auto output_name = m(node.output(0));
+            shaper_.Relu(input_name, output_name);
+            auto param = flatbnn::CreatePReluDirect(
+                builder_, input_name.c_str(), slope_name.c_str(),
+                output_name.c_str());
+            auto layer =
+                flatbnn::CreateLayer(builder_, flatbnn::LayerType::PRelu, 0, 0,
+                                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, param);
+            layers_.push_back(layer);
+            VLOG(5) << "Converting PRelu completed";
         } else if (op == "Relu") {
             VLOG(5) << "Start converting Relu";
             auto input_name = m(node.input(0));
@@ -498,11 +531,23 @@ void OnnxConverter::Convert(const ONNX_NAMESPACE::ModelProto &model_proto,
             throw std::invalid_argument("Unsupported operator " + op);
         }
     }
+
+    for (const auto &expected : expected_binary_conv_outputs) {
+        if (std::find(binary_conv_outputs.begin(), binary_conv_outputs.end(),
+                      expected) == binary_conv_outputs.end()) {
+            throw std::invalid_argument(
+                expected +
+                " is in the list file but not in the ONNX model, please check "
+                "your list file");
+        }
+    }
+
     auto flat_layers = builder_.CreateVector(layers_);
     auto flat_inputs = builder_.CreateVector(inputs);
     auto flat_tensors = builder_.CreateVector(tensors_);
     auto flat_model =
-        flatbnn::CreateModel(builder_, flat_layers, flat_tensors, flat_inputs);
+        flatbnn::CreateModel(builder_, flat_layers, flat_tensors, flat_inputs,
+                             BNN_LATEST_MODEL_VERSION);
 
     builder_.Finish(flat_model);
 
@@ -513,6 +558,8 @@ void OnnxConverter::Convert(const ONNX_NAMESPACE::ModelProto &model_proto,
     ofs.write(reinterpret_cast<char *>(builder_.GetBufferPointer()),
               builder_.GetSize());
     ofs.close();
+
+    return binary_conv_outputs;
 }
 
 void OnnxConverter::CalculateCoeff(const ONNX_NAMESPACE::NodeProto &node,
@@ -535,25 +582,30 @@ void OnnxConverter::CalculateCoeff(const ONNX_NAMESPACE::NodeProto &node,
         coeff_a_data.push_back(scale.data[i] / tmp);
         coeff_b_data.push_back(b.data[i] - scale.data[i] * mean.data[i] / tmp);
     }
-
     for (const auto &node2 : model_proto_.graph().node()) {
-        if (node2.op_type() == "Conv" && node2.output(0) == node.input(0)) {
+        if (node2.domain() == "dabnn" && node2.op_type() == "Conv" &&
+            node2.output(0) == node.input(0)) {
             const auto &weight = onnx_float_tensors_[node2.input(1)];
-            if (is_binary_weight(weight.data.data(), weight.shape)) {
-                {
-                    int channels = Shaper::onnx_kc(weight.shape);
-                    int width = Shaper::onnx_kw(weight.shape);
-                    int height = Shaper::onnx_kh(weight.shape);
+            {
+                int channels = Shaper::onnx_kc(weight.shape);
+                int width = Shaper::onnx_kw(weight.shape);
+                int height = Shaper::onnx_kh(weight.shape);
+
+                FORZ(i, coeff_b_data.size()) {
+                    coeff_b_data[i] = coeff_b_data[i] + channels * width *
+                                                            height *
+                                                            coeff_a_data[i];
+                }
+                if (node2.input_size() == 3) {
+                    const auto &bias = onnx_float_tensors_[node2.input(2)];
 
                     FORZ(i, coeff_b_data.size()) {
-                        coeff_b_data[i] = coeff_b_data[i] + channels * width *
-                                                                height *
-                                                                coeff_a_data[i];
+                        coeff_b_data[i] += coeff_a_data[i] * bias.data[i];
                     }
                 }
-                {
-                    FORZ(i, coeff_a_data.size()) { coeff_a_data[i] *= -2; }
-                }
+            }
+            {
+                FORZ(i, coeff_a_data.size()) { coeff_a_data[i] *= -2; }
             }
         }
     }

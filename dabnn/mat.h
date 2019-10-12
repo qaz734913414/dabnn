@@ -47,6 +47,8 @@ class Mat {
     // Conv weight or multi-batch blob
     Mat(int n, int w, int h, int c, DataType data_type,
         bool require_align = true);
+    Mat(int n, int w, int h, int c, DataType data_type, size_t data_num,
+        bool require_align = true);
     // external vec
     Mat(int w, void *data, DataType data_type);
     // external image
@@ -56,6 +58,8 @@ class Mat {
     // external dim
     Mat(int n, int w, int h, int c, void *data, DataType data_type,
         bool require_align = true);
+    Mat(int n, int w, int h, int c, void *data, DataType data_type,
+        size_t data_num, bool require_align = true);
 
     Mat subMat(int w1, int w2, int h1, int h2);
     // release
@@ -145,6 +149,8 @@ class Mat {
 
     DataType data_type;
 
+    size_t data_num_ = 0;
+
     std::string name;
 };
 
@@ -165,6 +171,9 @@ inline Mat::Mat(int _w, DataType data_type)
 
 inline Mat::Mat(int _w, int _h, DataType data_type)
     : data(nullptr), dims(0), data_type(data_type) {
+    if (data_type == DataType::Bit) {
+        _h /= 64;
+    }
     create(_w, _h, data_type);
 }
 
@@ -179,7 +188,14 @@ inline Mat::Mat(int _w, int _h, int _c, DataType data_type, std::string name)
 
 inline Mat::Mat(int _n, int _w, int _h, int _c, DataType data_type,
                 bool require_align)
+    : Mat(_n, _w, _h, _c, data_type, 0, require_align) {}
+
+inline Mat::Mat(int _n, int _w, int _h, int _c, DataType data_type,
+                size_t data_num, bool require_align)
     : data(nullptr), dims(0), data_type(data_type) {
+    if (data_num != 0) {
+        data_num_ = data_num;
+    }
     elem_c = _c;
     if (data_type == DataType::Bit) {
         _c /= 64;
@@ -236,6 +252,10 @@ inline Mat::Mat(int _w, int _h, int _c, void *_data, DataType data_type)
 
 inline Mat::Mat(int _n, int _w, int _h, int _c, void *_data, DataType data_type,
                 bool require_align)
+    : Mat(_n, _w, _h, _c, _data, data_type, 0, require_align) {}
+
+inline Mat::Mat(int _n, int _w, int _h, int _c, void *_data, DataType data_type,
+                size_t data_num, bool require_align)
     : data(_data), dims(4), data_type(data_type) {
     n = _n;
     w = _w;
@@ -245,8 +265,14 @@ inline Mat::Mat(int _n, int _w, int _h, int _c, void *_data, DataType data_type,
     if (data_type == DataType::Bit) {
         c /= 64;
     }
+    if (data_num != 0) {
+        data_num_ = data_num;
+        BNN_ASSERT(data_num_ >= static_cast<size_t>(n * w * h * c),
+                   "data_num_ ", data_num_,
+                   " should be not smaller than n * w * h * c, ", n, ", ", w,
+                   ", ", h, ", ", c);
+    }
     elemsize = data_type == DataType::Float ? sizeof(float) : sizeof(uint64_t);
-    BNN_ASSERT(c > 0, c);
     std::stringstream ss;
     ss << "Not align, w: " << w << ", c: " << c << ", elemsize: " << elemsize;
     BNN_ASSERT(!require_align || w * c == 1 || w * c * elemsize % 16 == 0,
@@ -254,9 +280,12 @@ inline Mat::Mat(int _n, int _w, int _h, int _c, void *_data, DataType data_type,
     if (require_align) {
         hstep = ncnn::alignSize(w * c * elemsize, 16) / elemsize;
     } else {
-        hstep = w * c * elemsize;
+        hstep = w * c;
     }
-    BNN_ASSERT(hstep > 0, hstep);
+    if (data_num == 0) {
+        BNN_ASSERT(c > 0, c);
+        BNN_ASSERT(hstep > 0, hstep);
+    }
 
     external_memory = true;
 }
@@ -271,12 +300,32 @@ inline bool Mat::operator==(const Mat &m) const {
           h == m.h && c == m.c && data_type == m.data_type)) {
         return false;
     }
-    FORZ(i, total()) {
-        if (std::abs(static_cast<float *>(data)[i] - m[i]) > 1e-5) {
-            PNT(static_cast<float *>(data)[i]);
-            PNT(m[i]);
-            return false;
+    if (m.data_type == DataType::Float) {
+        FORZ(i, total()) {
+            const auto elem = static_cast<float *>(data)[i];
+            if (std::isnan(elem) && !std::isnan(m[i])) {
+                PNT(elem, m[i]);
+                return false;
+            }
+            if (!std::isnan(elem) && std::isnan(m[i])) {
+                PNT(elem, m[i]);
+                return false;
+            }
+            if (std::abs(elem - m[i]) > 1e-5) {
+                PNT(i, elem, m[i]);
+                return false;
+            }
         }
+    } else if (m.data_type == DataType::Bit) {
+        FORZ(i, total()) {
+            const auto elem = static_cast<uint64_t *>(data)[i];
+            if (elem != m[i]) {
+                PNT(elem, m[i]);
+                return false;
+            }
+        }
+    } else {
+        throw std::invalid_argument("Unknown datatype");
     }
     return true;
 }
@@ -285,8 +334,9 @@ inline std::ostream &operator<<(std::ostream &os, const Mat &mat) {
     os << "n: " << mat.n << ", width: " << mat.w << ", height: " << mat.h
        << ", channels: " << mat.c << std::endl;
     if (mat.data_type == DataType::Bit) {
-        return os << binrep(*static_cast<char *>(mat.data),
-                            std::min(mat.total(), size_t{10}) * mat.elemsize);
+        return os << binrep(static_cast<char *>(mat.data),
+                            std::min(mat.total(), size_t{10}) * mat.elemsize,
+                            true);
     } else {
         for (size_t i = 0;
              i < std::min(static_cast<decltype(mat.total())>(10), mat.total());
@@ -481,11 +531,6 @@ inline void Mat::create(int _w, int _h, int _c, DataType _data_type) {
     h = _h;
     c = _c;
 
-    if (w * c != 1 && w * c * elemsize % 16 != 0) {
-        LOG(FATAL) << "Not align, w: " << w << ", c: " << c
-                   << ", elemsize: " << elemsize;
-        throw std::invalid_argument("Not align!");
-    }
     hstep = ncnn::alignSize(w * c * elemsize, 16) / elemsize;
 
     if (total() > 0) {
@@ -515,15 +560,10 @@ inline void Mat::create(int _n, int _w, int _h, int _c, DataType _data_type,
     if (h != 0) dims++;
     if (c != 0) dims++;
 
-    if (require_align && w * c != 1 && w * c * elemsize % 16 != 0) {
-        LOG(FATAL) << "Not align, w: " << w << ", c: " << c
-                   << ", elemsize: " << elemsize;
-        throw std::invalid_argument("Not align!");
-    }
     if (require_align) {
         hstep = ncnn::alignSize(w * c * elemsize, 16) / elemsize;
     } else {
-        hstep = w * c * elemsize;
+        hstep = w * c;
     }
     BNN_ASSERT(hstep > 0, hstep);
 
@@ -554,28 +594,38 @@ inline void Mat::release() {
 
 inline bool Mat::empty() const { return data == nullptr || total() == 0; }
 
-inline size_t Mat::total() const { return n * h * w * c; }
+inline size_t Mat::total() const {
+    if (data_num_ != 0) {
+        return data_num_;
+    } else {
+        return n * h * w * c;
+    }
+}
 
 template <typename T>
 inline const T *Mat::point(int _n, int _h, int _w) const {
+    BNN_ASSERT(w * c == 1 || w * c * elemsize % 16 == 0, "");
     BNN_ASSERT((_n == 0 && _h == 0 && _w == 0) || hstep > 0, hstep);
     return (T *)data + _n * h * hstep + _h * hstep + _w * c;
 }
 
 template <typename T>
 inline const T *Mat::point(int _h, int _w) const {
+    BNN_ASSERT(w * c == 1 || w * c * elemsize % 16 == 0, "");
     BNN_ASSERT((_h == 0 && _w == 0) || hstep > 0, hstep);
     return (T *)data + _h * hstep + _w * c;
 }
 
 template <typename T>
 inline T *Mat::point(int _n, int _h, int _w) {
+    BNN_ASSERT(w * c == 1 || w * c * elemsize % 16 == 0, "");
     BNN_ASSERT((_n == 0 && _h == 0 && _w == 0) || hstep > 0, hstep);
     return (T *)data + _n * h * hstep + _h * hstep + _w * c;
 }
 
 template <typename T>
 inline T *Mat::point(int _h, int _w) {
+    BNN_ASSERT(w * c == 1 || w * c * elemsize % 16 == 0, "");
     BNN_ASSERT((_h == 0 && _w == 0) || hstep > 0, hstep);
     return (T *)data + _h * hstep + _w * c;
 }

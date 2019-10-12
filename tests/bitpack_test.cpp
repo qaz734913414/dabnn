@@ -9,6 +9,7 @@
 #include <common/helper.h>
 #include <dabnn/mat.h>
 
+#ifdef __aarch64__
 TEST(bitpack, pack_mat_128) {
     const size_t AHEIGHT = 64;
     const size_t AWIDTH = 64;
@@ -20,7 +21,7 @@ TEST(bitpack, pack_mat_128) {
     const bnn::Mat a(AHEIGHT, AWIDTH, CHANNEL, a_data, bnn::DataType::Float);
     bnn::Mat a_binary(AHEIGHT, AWIDTH, CHANNEL, bnn::DataType::Bit);
     bnn::Mat expected(AHEIGHT, AWIDTH, CHANNEL, bnn::DataType::Bit);
-    pack_mat_128(a, a_binary);
+    pack_mat_128_opt(a, a_binary);
 
     baseline_pack_mat(a, expected);
 
@@ -32,6 +33,7 @@ TEST(bitpack, pack_mat_128) {
                       bitcount(*(static_cast<uint64_t *>(expected) + i + 1)));
     }
 }
+#endif  // __aarch64__
 
 TEST(bitpack, pack_mat_64) {
     const size_t AHEIGHT = 64;
@@ -55,22 +57,4 @@ TEST(bitpack, pack_mat_64) {
                   bitcount(*(static_cast<uint64_t *>(expected) + i)) +
                       bitcount(*(static_cast<uint64_t *>(expected) + i + 1)));
     }
-}
-
-TEST(bitpack, pack_mat_fallback) {
-    const size_t AHEIGHT = 64;
-    const size_t AWIDTH = 64;
-    const size_t CHANNEL = 256;
-    const size_t ALEN = AHEIGHT * AWIDTH * CHANNEL;
-    float a_data[ALEN];
-    fill_rand_float(a_data, ALEN);
-
-    const bnn::Mat a(AHEIGHT, AWIDTH, CHANNEL, a_data, bnn::DataType::Float);
-    bnn::Mat a_binary(AHEIGHT, AWIDTH, CHANNEL, bnn::DataType::Bit);
-    bnn::Mat expected(AHEIGHT, AWIDTH, CHANNEL, bnn::DataType::Bit);
-    pack_mat_128(a, a_binary);
-
-    pack_128_fallback(a_data, expected.data, ALEN);
-
-    ASSERT_EQ(a_binary, expected);
 }

@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-#include <common/daq_generated.h>
+#include <common/dab_generated.h>
 #include <flatbuffers/flatbuffers.h>
 
 #include <common/helper.h>
@@ -150,6 +150,8 @@ inline std::string layer_type_to_str(flatbnn::LayerType type) {
             return "split";
         case flatbnn::LayerType::Shuffle:
             return "shuffle";
+        case flatbnn::LayerType::PRelu:
+            return "prelu";
         default:
             BNN_ASSERT(false, "Missing type in this function");
     }

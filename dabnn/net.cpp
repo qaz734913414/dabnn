@@ -9,6 +9,8 @@
 #include <vector>
 
 #include <common/flatbuffers_helper.h>
+#include <common/macros.h>
+#include <dabnn/bitpack.h>
 #include <dabnn/layers/Add.h>
 #include <dabnn/layers/Affine.h>
 #include <dabnn/layers/AvePool.h>
@@ -20,14 +22,12 @@
 #include <dabnn/layers/Relu.h>
 #include <dabnn/layers/Shuffle.h>
 #include <dabnn/layers/Split.h>
+#include <dabnn/layers/PRelu.h>
 
 using std::string;
 using std::vector;
 
 namespace bnn {
-string get_bin_imm_name(string name) { return name + "_bin"; }
-
-string get_pad_imm_name(string name) { return "pad_for_" + name + "_cal"; }
 
 void Net::read(const std::string &path) {
     auto fd = open(path.c_str(), O_RDONLY);
@@ -53,6 +53,9 @@ void Net::read_impl(const void *ptr) {
 
 void Net::prepare() {
     BNN_ASSERT(!(strict && !run_fconv), "fconv must be run in strict mode");
+    BNN_ASSERT(model_->version() == BNN_LATEST_MODEL_VERSION,
+               "The model version should be ", BNN_LATEST_MODEL_VERSION,
+               ", got ", model_->version(), " instead.");
     for (const auto &tensor : *model_->inputs()) {
         Shaper::Shape shape(tensor->shape()->begin(), tensor->shape()->end());
         const auto name = tensor->name()->str();
@@ -68,17 +71,44 @@ void Net::prepare() {
 
     for (const auto &tensor : *model_->initializers()) {
         if (tensor->data_type() == flatbnn::DataType::Bit) {
+            // This shape is the same as that of flatbuffers
             Shaper::Shape shape(tensor->shape()->begin(),
                                 tensor->shape()->end());
-            const auto *data = tensor->bin_data()->Data();
+            const auto *data = tensor->bin_data()->data();
+
             const auto name = tensor->name()->str();
 
             shaper.AddShape(name, shape);
 
-            add_mat(name,
-                    std::make_shared<Mat>(shape[0], shape[1], shape[2],
-                                          shape[3], const_cast<uint8_t *>(data),
-                                          bnn::DataType::Bit, false));
+            const auto len = tensor->bin_data()->size();
+#ifdef __aarch64__
+            // TODO: Move it to binconv.cpp
+            // 1. More correct
+            // 2. Don't need to maintain the the same shape
+            if (Shaper::c(shape) % 128 == 0) {
+                // Re-arrange the bit order for the optmized bit-packing
+                const auto tmp = std::make_shared<Mat>(
+                    shape[0], shape[1], shape[2], shape[3],
+                    bnn::DataType::Float, false);
+                auto *float_data = static_cast<float *>(tmp->data);
+                FORZ(i, len) {
+                    std::bitset<64> bs(*(data + i));
+                    FORZ(j, 64) { float_data[i * 64 + j] = bs[j] ? 1 : -1; }
+                }
+
+                add_mat(name, std::make_shared<Mat>(
+                                  shape[0], shape[1], shape[2], shape[3],
+                                  bnn::DataType::Bit, len, false));
+                pack_mat(*tmp, *mat_map_[name]);
+            } else {
+#endif  // __aarch64__
+                add_mat(name, std::make_shared<Mat>(
+                                  shape[0], shape[1], shape[2], shape[3],
+                                  const_cast<uint64_t *>(data),
+                                  bnn::DataType::Bit, len, false));
+#ifdef __aarch64__
+            }
+#endif  // __aarch64__
         } else if (tensor->data_type() == flatbnn::DataType::Float32) {
             Shaper::Shape shape(tensor->shape()->begin(),
                                 tensor->shape()->end());
@@ -102,7 +132,7 @@ void Net::prepare() {
                 memcpy(buf->data(), data, shape[0] * sizeof(float));
                 add_mat(name, std::make_shared<Mat>(shape[0], buf->data(),
                                                     DataType::Float));
-                float_bufs.push_back(buf);
+                float_bufs_.push_back(buf);
             }
         }
     }
@@ -138,17 +168,9 @@ void Net::prepare() {
 
                 break;
             }
-            case flatbnn::LayerType::Binarize: {
-                ADD_LAYER_WITH_DATA_TYPE(binarize, Binarize, DataType::Bit,
-                                         input, output);
-                layers.push_back(std::make_shared<Binarize>(get_weak(), name,
-                                                            input, output));
-                break;
-            }
             case flatbnn::LayerType::BinConv2D: {
-                ADD_LAYER_WITH_DATA_TYPE(bin_conv2d, Conv, DataType::Float,
-                                         input, strides, dilations, pads,
-                                         weight, output);
+                ADD_LAYER(bin_conv2d, Conv, input, strides, dilations, pads,
+                          weight, output);
                 BNN_ASSERT(pads.size() == 2 ||
                                (pads.size() == 4 && pads[0] == pads[2] &&
                                 pads[1] == pads[3]),
@@ -164,9 +186,15 @@ void Net::prepare() {
                 break;
             }
             case flatbnn::LayerType::Affine: {
+#ifdef BNN_CHECK_CONSISTENCY
+                ADD_LAYER(affine, Affine, input, a, b, output);
+                layers.push_back(std::make_shared<Affine>(get_weak(), name,
+                                                          input, a, b, output));
+#else
                 ADD_INPLACE_LAYER(affine, Affine, input, a, b, output);
                 layers.push_back(
                     std::make_shared<Affine>(get_weak(), name, input, a, b));
+#endif
                 break;
             }
             case flatbnn::LayerType::Add: {
@@ -224,6 +252,12 @@ void Net::prepare() {
                 ADD_INPLACE_LAYER(shuffle, Shuffle, input, output);
                 layers.push_back(
                     std::make_shared<Shuffle>(get_weak(), name, input));
+                break;
+            }
+            case flatbnn::LayerType::PRelu: {
+                ADD_INPLACE_LAYER(prelu, Eltwise, input, slope, output);
+                layers.push_back(
+                    std::make_shared<PRelu>(get_weak(), name, input, slope));
                 break;
             }
             default: {

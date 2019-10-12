@@ -15,7 +15,7 @@ TEST(net, bireal18cifar) {
     const std::string blob_name = "187";
     {
     auto net1 = bnn::Net::create();
-    net1->read("/data/local/tmp/model_cifar100.daq");
+    net1->read("/data/local/tmp/model_cifar100.dab");
     net1->optimize = true;
     net1->run(input);
     const auto &blob1 = net1->get_blob(blob_name);
@@ -34,15 +34,15 @@ TEST(net, bireal18imagenet_comparison) {
     std::shared_ptr<bnn::Mat> blob1, blob2;
     {
         auto net = bnn::Net::create();
-        net->read("/data/local/tmp/model_imagenet.daq");
         net->optimize = false;
+        net->read("/data/local/tmp/model_imagenet.dab");
         net->run(input);
         blob1 = net->get_blob(blob_name);
     }
     {
         auto net = bnn::Net::create();
-        net->read("/data/local/tmp/model_imagenet.daq");
         net->optimize = true;
+        net->read("/data/local/tmp/model_imagenet.dab");
         net->run(input);
         blob2 = net->get_blob(blob_name);
     }
@@ -55,14 +55,14 @@ TEST(net, bireal18imagenet) {
 
     const std::string blob_name = "188";
     {
-        auto net1 = bnn::Net::create();
-        net1->read("/data/local/tmp/model_imagenet.daq");
-        net1->optimize = true;
-        net1->run(input);
-        const auto blob1 = net1->get_blob(blob_name);
-        ASSERT_NEAR((*blob1)[0], -0.9431, 1e-4);
-        ASSERT_NEAR((*blob1)[1], -1.2626, 1e-4);
-        ASSERT_NEAR((*blob1)[2], -5.1064, 1e-4);
+        auto net = bnn::Net::create();
+        net->optimize = true;
+        net->read("/data/local/tmp/model_imagenet.dab");
+        net->run(input);
+        const auto blob = net->get_blob(blob_name);
+        ASSERT_NEAR((*blob)[0], -0.9431, 1e-4);
+        ASSERT_NEAR((*blob)[1], -1.2626, 1e-4);
+        ASSERT_NEAR((*blob)[2], -5.1064, 1e-4);
     }
 }
 
@@ -74,15 +74,15 @@ TEST(net, bireal18imagenetstem_comparison) {
     std::shared_ptr<bnn::Mat> blob1, blob2;
     {
         auto net = bnn::Net::create();
-        net->read("/data/local/tmp/model_imagenet_stem.daq");
         net->optimize = false;
+        net->read("/data/local/tmp/model_imagenet_stem.dab");
         net->run(input);
         blob1 = net->get_blob(blob_name);
     }
     {
         auto net = bnn::Net::create();
-        net->read("/data/local/tmp/model_imagenet_stem.daq");
         net->optimize = true;
+        net->read("/data/local/tmp/model_imagenet_stem.dab");
         net->run(input);
         blob2 = net->get_blob(blob_name);
     }
@@ -95,13 +95,13 @@ TEST(net, bireal18imagenetstem) {
 
     const std::string blob_name = "216";
     {
-        auto net1 = bnn::Net::create();
-        net1->read("/data/local/tmp/model_imagenet_stem.daq");
-        net1->optimize = true;
-        net1->run(input);
-        const auto &blob1 = net1->get_blob(blob_name);
-        ASSERT_NEAR((*blob1)[0], 1.9842, 1e-4);
-        ASSERT_NEAR((*blob1)[1], 3.4204, 1e-4);
-        ASSERT_NEAR((*blob1)[2], -3.2586, 1e-4);
+        auto net = bnn::Net::create();
+        net->optimize = true;
+        net->read("/data/local/tmp/model_imagenet_stem.dab");
+        net->run(input);
+        const auto &blob = net->get_blob(blob_name);
+        ASSERT_NEAR((*blob)[0], 1.9842, 1e-4);
+        ASSERT_NEAR((*blob)[1], 3.4204, 1e-4);
+        ASSERT_NEAR((*blob)[2], -3.2586, 1e-4);
     }
 }

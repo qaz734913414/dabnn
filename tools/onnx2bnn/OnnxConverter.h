@@ -3,11 +3,12 @@
 #ifndef BNN_ONNXCONVERTER_H
 #define BNN_ONNXCONVERTER_H
 
+#include <set>
 #include "optional.h"
 
 #include <common/Shaper.h>
 #include <common/StrKeyMap.h>
-#include <common/daq_generated.h>
+#include <common/dab_generated.h>
 #include <common/helper.h>
 #include <glog/logging.h>
 #include <onnx/onnx_pb.h>
@@ -21,6 +22,10 @@ class OnnxConverter {
     struct Tensor {
         std::vector<T> data;
         Shaper::Shape shape;
+        bool align_hwc_to_128 = false;
+        Tensor() = default;
+        Tensor(const std::vector<T> &data, const Shaper::Shape &shape, const bool align_hwc_to_128):
+            data(data), shape(shape), align_hwc_to_128(align_hwc_to_128) {}
         inline T get(const std::vector<Shaper::len_t> &x) {
             auto step = get_shape_for_accessing_element();
             for (int i = shape.size() - 2; i >= 0; i--) {
@@ -52,9 +57,7 @@ class OnnxConverter {
 
     std::vector<std::string> operands_;
     StrKeyMap<FTensor> bnn_tensors_;
-    StrKeyMap<BTensor> bnn_bin_tensors_;
     StrKeyMap<FTensor> onnx_float_tensors_;
-    StrKeyMap<BTensor> onnx_bin_tensors_;
     std::vector<flatbuffers::Offset<flatbnn::Layer>> layers_;
 
     std::vector<flatbuffers::Offset<flatbnn::Tensor>> tensors_;
@@ -83,11 +86,14 @@ class OnnxConverter {
                  const std::vector<int> &dilations, int group,
                  const std::string &ori_weight_name,
                  const nonstd::optional<std::string> &bias_name,
-                 const std::string &output_name);
+                 const std::string &output_name,
+                 const bool binary);
 
     void CalculateCoeff(const ONNX_NAMESPACE::NodeProto &node,
                         const std::string &coeff_a_name,
                         const std::string &coeff_b_name);
+
+    void GetBinTensors();
 
     /**
      * onnx: [filter_out_channel, filter_in_channel / group, height, width]
@@ -146,8 +152,14 @@ class OnnxConverter {
     }
 
    public:
-    void Convert(const ONNX_NAMESPACE::ModelProto &model,
-                 const std::string &filepath);
+    enum class Level {
+        kStrict,
+        kModerate,
+        kAggressive,
+    };
+    std::vector<std::string> Convert(const ONNX_NAMESPACE::ModelProto &model,
+                 const std::string &filepath,
+                 const Level level, const std::vector<std::string> &expected_binary_conv_outputs);
 };
 
 template <>
